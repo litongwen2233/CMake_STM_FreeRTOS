@@ -22,6 +22,22 @@
 ;* If no LICENSE file comes with this software, it is provided AS-IS.
 ;*
 ;******************************************************************************
+;在该文件中使用到的汇编指令
+; EQU               给数字常量命名 相当于c语言中的#define
+; AREA              汇编一个新的代码段或者数据段 汇编器根据ARER把整个源文件划分成多个独立的，命名的，不可分割的段
+                    ARER后面的属性就是贴上去的标签，让汇编器和链接器知道怎么处理这段
+                    分段就是为了让链接器能按物理存储器的差异来安置它们
+; SPACE             分配内存空间
+; PRESERVE8         当前文件堆栈需按照8字节对齐
+; EXPORT            声明一个标号具有全局属性，可被为外部的文件使用
+; DCD               以字为单位分配内存 要求4字节对齐 并要求初始化这些内存
+; PROC              定义子程序 与ENDP成对使用，表示子程序结束
+; WEAK              弱定义 如果外部文件声明了一个标号 则优先使用外部文件定义的 如果外部没有定义 就使用当前的 用于占位
+; IMPORT            声明标号来自外部文件 跟c语言中的EXTERN关键字类似
+; B                 跳转到一个标号
+; ALIGN             编译器对指令或者数据的存放地址进行对齐 
+; END               到达文件的末尾，文件结束
+; IF,ELSE,ENDIF     汇编条件分支语句 跟c语言中的if else 类似
 
 ; Amount of memory (in bytes) allocated for Stack
 ; Tailor this value to your application needs
@@ -29,7 +45,9 @@
 ;   <o> Stack Size (in Bytes) <0x0-0xFFFFFFFF:8>
 ; </h>
 ;Stack -- 栈
-Stack_Size      EQU     0x00000400              ; ← 这里只是定义符号，不是分配！
+Stack_Size      EQU     0x00000400              ; 定义一个变量Stack_Size·· 数值为0x00000400
+                ; AREA 可以简单理解为{} 括号的结束为下一个AREA位置 在本段中我们可以定义一些属性
+                ; AREA后面紧跟着的是本段的名称 在后面，后面的就是我们要赋给本段的一些属性
 
                 AREA    STACK, NOINIT, READWRITE, ALIGN=3
 Stack_Mem       SPACE   Stack_Size     ; ← 这里才是真正的栈空间预留
@@ -54,14 +72,16 @@ __heap_limit
 
 ; Vector Table Mapped to Address 0 at Reset
 ; 向量表
+                ; 定义一个数据段 名字为RESET 只读
                 AREA    RESET, DATA, READONLY
-                EXPORT  __Vectors
-                EXPORT  __Vectors_End
-                EXPORT  __Vectors_Size
+                ; 声明 __Vectors、__Vectors_End 和 __Vectors_Size这三个标号具有全局属性，可供外部的文件调用
+                EXPORT  __Vectors       ;向量表起始地址
+                EXPORT  __Vectors_End   ;向量表结束地址
+                EXPORT  __Vectors_Size  ;向量表长度
 
 __Vectors       DCD     __initial_sp               ; 栈顶地址放在0x00000000 Top of Stack
                 DCD     Reset_Handler              ; 复位向量放在0x00000004 Reset Handler
-                DCD     NMI_Handler                ; 硬件错误处理 NMI处理器 NMI Handler
+                DCD     NMI_Handler                ; 硬件错误处理 NMI处理器 NMI Handler 
                 DCD     HardFault_Handler          ; Hard Fault Handler
                 DCD     MemManage_Handler          ; MPU Fault Handler
                 DCD     BusFault_Handler           ; Bus Fault Handler
@@ -128,15 +148,20 @@ __Vectors_Size  EQU  __Vectors_End - __Vectors
                 AREA    |.text|, CODE, READONLY
 
 ; Reset handler
-Reset_Handler    PROC
-                 EXPORT  Reset_Handler             [WEAK]
-     IMPORT  __main
-     IMPORT  SystemInit
-                 LDR     R0, =SystemInit
-                 BLX     R0
-                 LDR     R0, =__main
-                 BX      R0
-                 ENDP
+Reset_Handler    PROC    ;定义一个程序Reset_Handler
+                EXPORT  Reset_Handler             [WEAK]
+    ;表示这两个__main，SystemInit函数来自为外部的文件
+    IMPORT  __main
+    IMPORT  SystemInit
+                ;LDR:从存储器中加载字到一个寄存器
+                LDR     R0, =SystemInit
+                ;BL:跳转到指定寄存器给出的地址，并根寄存器的LSE确定处理器的状态，还要把跳转前的下一条指令保存到LR
+                BLX     R0
+                LDR     R0, =__main
+                ;BX：跳转到由寄存器/标号给出的地址
+                BX      R0
+                ;
+                ENDP
 
 ; Dummy Exception Handlers (infinite loops which can be modified)
 ; 中断服务程序

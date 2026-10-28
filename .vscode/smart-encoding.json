@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "files": {
+    "Core/FreeRTOS/include/FreeRTOS.h": "utf8",
+    "Core/FreeRTOS/include/task.h": "utf8",
+    "Core/FreeRTOS/src/event_groups.c": "utf8",
+    "Core/FreeRTOS/src/list.c": "utf8",
+    "Core/FreeRTOS/src/queue.c": "utf8",
+    "Core/FreeRTOS/src/stream_buffer.c": "utf8",
+    "Core/FreeRTOS/src/tasks.c": "utf8",
+    "Core/FreeRTOS/src/timers.c": "utf8",
+    "Core/Src/main.c": "utf8",
+    "Drivers/CMSIS/Device/ST/STM32F1xx/Source/Templates/system_stm32f1xx.c": "utf8"
+  }
+}

@@ -374,7 +374,7 @@
  * and stores task state information, including a pointer to the task's context
  * (the task's run time environment, including register values)
  */
-//任务控制块
+//TCB 任务控制块
 typedef struct tskTaskControlBlock       /* The old naming convention is used to prevent breaking kernel aware debuggers. */
 {
     volatile StackType_t * pxTopOfStack; /**<1.栈顶指针 Points to the location of the last item placed on the tasks stack.  THIS MUST BE THE FIRST MEMBER OF THE TCB STRUCT. */
@@ -389,9 +389,9 @@ typedef struct tskTaskControlBlock       /* The old naming convention is used to
 
     /* 4. 链表节点 */
     ListItem_t xStateListItem;                  /**<状态链表 The list that the state list item of a task is reference from denotes the state of that task (Ready, Blocked, Suspended ). */
-    ListItem_t xEventListItem;                  /**<事件链表 Used to reference a task from an event list. */
+    ListItem_t xEventListItem;                  /**<事件等待信息 Used to reference a task from an event list. */
     UBaseType_t uxPriority;                     /**<5. 优先级 The priority of the task.  0 is the lowest priority. */
-    StackType_t * pxStack;                      /**<6. 栈指针 Points to the start of the stack. */
+    StackType_t * pxStack;                      /**<6. 任务栈起始地址 Points to the start of the stack. */
     #if ( configNUMBER_OF_CORES > 1 )
         /*7. 多核运行状态*/
         volatile BaseType_t xTaskRunState;      /**< Used to identify the core the task is running on, if the task is running. Otherwise, identifies the task's state - not running or yielding. */
@@ -3907,14 +3907,14 @@ STATIC BaseType_t prvCreateIdleTasks( void )
 
 /**
  * @brief 启动调度器
- * 
+ * 完成所有启动准备后，把控制权交给调度器，让第一个任务开始运行，且永不返回
  */
 void vTaskStartScheduler( void )
 {
     BaseType_t xReturn;
 
     traceENTER_vTaskStartScheduler();
-
+    //多核亲和性检查
     #if ( configUSE_CORE_AFFINITY == 1 ) && ( configNUMBER_OF_CORES > 1 )
     {
         /* Sanity check that the UBaseType_t must have greater than or equal to
@@ -3922,9 +3922,9 @@ void vTaskStartScheduler( void )
         configASSERT( ( sizeof( UBaseType_t ) * taskBITS_PER_BYTE ) >= configNUMBER_OF_CORES );
     }
     #endif /* #if ( configUSE_CORE_AFFINITY == 1 ) && ( configNUMBER_OF_CORES > 1 ) */
-
+    //创建空闲任务
     xReturn = prvCreateIdleTasks();
-
+    //创建定时器任务
     #if ( configUSE_TIMERS == 1 )
     {
         if( xReturn == pdPASS )
@@ -3937,7 +3937,7 @@ void vTaskStartScheduler( void )
         }
     }
     #endif /* configUSE_TIMERS */
-
+    //用户自定义初始化
     if( xReturn == pdPASS )
     {
         /* freertos_tasks_c_additions_init() should only be called if the user
@@ -3954,6 +3954,7 @@ void vTaskStartScheduler( void )
          * the created tasks contain a status word with interrupts switched on
          * so interrupts will automatically get re-enabled when the first task
          * starts to run. */
+        //关中断
         portDISABLE_INTERRUPTS();
 
         #if ( configUSE_C_RUNTIME_TLS_SUPPORT == 1 )
@@ -3963,10 +3964,10 @@ void vTaskStartScheduler( void )
             configSET_TLS_BLOCK( pxCurrentTCB->xTLSBlock );
         }
         #endif
-
-        xNextTaskUnblockTime = portMAX_DELAY;
-        xSchedulerRunning = pdTRUE;
-        xTickCount = ( TickType_t ) configINITIAL_TICK_COUNT;
+        //设置调度器运行状态
+        xNextTaskUnblockTime = portMAX_DELAY;//下一个任务解除阻塞的时间设为最大值
+        xSchedulerRunning = pdTRUE;//标记调度器已经开始运行
+        xTickCount = ( TickType_t ) configINITIAL_TICK_COUNT;//初始化 tick 计数器
 
         /* If configGENERATE_RUN_TIME_STATS is defined then the following
          * macro must be defined to configure the timer/counter used to generate
@@ -3974,6 +3975,7 @@ void vTaskStartScheduler( void )
          * is set to 0 and the following line fails to build then ensure you do not
          * have portCONFIGURE_TIMER_FOR_RUN_TIME_STATS() defined in your
          * FreeRTOSConfig.h file. */
+        //配置运行时统计定时器
         portCONFIGURE_TIMER_FOR_RUN_TIME_STATS();
 
         traceTASK_SWITCHED_IN();
@@ -4002,6 +4004,7 @@ void vTaskStartScheduler( void )
         /* This line will only be reached if the kernel could not be started,
          * because there was not enough FreeRTOS heap to create the idle task
          * or the timer task. */
+        //失败处理
         configASSERT( xReturn != errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY );
     }
 

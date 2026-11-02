@@ -3750,57 +3750,77 @@ STATIC void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
 
 #endif /* ( ( INCLUDE_xTaskResumeFromISR == 1 ) && ( INCLUDE_vTaskSuspend == 1 ) ) */
 /*-----------------------------------------------------------*/
-
+/**
+ * @brief 创建空闲任务的内部函数
+ * 
+ * @return STATIC 
+ */
 STATIC BaseType_t prvCreateIdleTasks( void )
 {
-    BaseType_t xReturn = pdPASS;
-    BaseType_t xCoreID;
-    char cIdleName[ configMAX_TASK_NAME_LEN ] = { 0 };
-    TaskFunction_t pxIdleTaskFunction = NULL;
-    UBaseType_t xIdleTaskNameIndex;
+    BaseType_t xReturn = pdPASS;                        /* 返回状态：pdPASS 成功 / pdFAIL 失败 */
+    BaseType_t xCoreID;                                 /* 核编号，遍历各核创建空闲任务 */
+    char cIdleName[ configMAX_TASK_NAME_LEN ] = { 0 };  /* 空闲任务名缓冲，先清零 */
+    TaskFunction_t pxIdleTaskFunction = NULL;           /* 当前要创建的空闲任务入口函数指针 */
+    UBaseType_t xIdleTaskNameIndex;                     /* 用来记录名字拷到了第几个字符 */
 
     /* MISRA Ref 14.3.1 [Configuration dependent invariant] */
     /* More details at: https://github.com/FreeRTOS/FreeRTOS-Kernel/blob/main/MISRA.md#rule-143. */
     /* coverity[misra_c_2012_rule_14_3_violation] */
+    /* MISRA 规则 14.3.1 的 deviation 说明（静态工具检查用的注释，对功能无影响） */
+    /* for 循环条件用的是"编译期可确定的边界"，MISRA 对 for 有额外约束，这里声明是有意为之 */
     for( xIdleTaskNameIndex = 0U; xIdleTaskNameIndex < ( configMAX_TASK_NAME_LEN - taskRESERVED_TASK_NAME_LENGTH ); xIdleTaskNameIndex++ )
     {
         /* MISRA Ref 18.1.1 [Configuration dependent bounds checking] */
         /* More details at: https://github.com/FreeRTOS/FreeRTOS-Kernel/blob/main/MISRA.md#rule-181. */
         /* coverity[misra_c_2012_rule_18_1_violation] */
+        /* MISRA 18.1.1 deviation 说明：数组下标未做显式越界检查，靠配置约束保证 */
+        /* 把 configIDLE_TASK_NAME（默认为 "IDLE"）逐字符拷进 cIdleName */
         cIdleName[ xIdleTaskNameIndex ] = configIDLE_TASK_NAME[ xIdleTaskNameIndex ];
-
+        /* 遇到字符串结束符就提前退出循环。
+         * 为什么不用 strcpy？
+         *   - FreeRTOS 避免依赖标准库（体积/可移植性考虑）
+         *   - configIDLE_TASK_NAME 理论上可能超长，需要截断保护
+         * 同时保留了"最多拷贝 N 个字符"的上限，不会溢出缓冲 */
         if( cIdleName[ xIdleTaskNameIndex ] == ( char ) 0x00 )
         {
             break;
         }
         else
         {
-            mtCOVERAGE_TEST_MARKER();
+            mtCOVERAGE_TEST_MARKER();   /* 覆盖率测试占位，无实际动作 */
         }
     }
 
     /* Ensure null termination. */
+    /* 确保字符串以 '\0' 结尾：
+     * 两种情况都会走到这里——
+     *   1) 上面遇到 '\0' 提前 break：这里再写一次 '\0'（冗余但无害）
+     *   2) 循环跑到边界上限仍未遇到 '\0'：这里补上结束符，完成截断 */
     cIdleName[ xIdleTaskNameIndex ] = '\0';
 
     /* Add each idle task at the lowest priority. */
+    /* 为每个核创建空闲任务。单核时 configNUMBER_OF_CORES == 1，只循环一次 */
     for( xCoreID = ( BaseType_t ) 0; xCoreID < ( BaseType_t ) configNUMBER_OF_CORES; xCoreID++ )
     {
+        /* ---------- 决定用哪个任务函数 ---------- */
         #if ( configNUMBER_OF_CORES == 1 )
         {
-            pxIdleTaskFunction = &prvIdleTask;
+            pxIdleTaskFunction = &prvIdleTask;  /* 单核：只有普通空闲任务 */
         }
-        #else /* #if (  configNUMBER_OF_CORES == 1 ) */
+        #else /* #if (  configNUMBER_OF_CORES == 1 ) *//* SMP 多核 */
         {
             /* In the FreeRTOS SMP, configNUMBER_OF_CORES - 1 passive idle tasks
              * are also created to ensure that each core has an idle task to
              * run when no other task is available to run. */
+            /* 在 SMP 中，除了 1 个活动空闲任务，还要创建 configNUMBER_OF_CORES-1 个
+             * "被动空闲任务"（passive idle），保证每个核在无任务可跑时都有空闲任务兜底 */
             if( xCoreID == 0 )
             {
-                pxIdleTaskFunction = &prvIdleTask;
+                pxIdleTaskFunction = &prvIdleTask;  /* 核 0：活动空闲任务（真正做 GC 等工作） */
             }
             else
             {
-                pxIdleTaskFunction = &prvPassiveIdleTask;
+                pxIdleTaskFunction = &prvPassiveIdleTask;   /* 其他核：被动空闲任务 */
             }
         }
         #endif /* #if (  configNUMBER_OF_CORES == 1 ) */
@@ -3808,6 +3828,7 @@ STATIC BaseType_t prvCreateIdleTasks( void )
         /* Update the idle task name with suffix to differentiate the idle tasks.
          * This function is not required in single core FreeRTOS since there is
          * only one idle task. */
+        /* ---------- SMP 下给任务名加后缀区分 ---------- */
         #if ( configNUMBER_OF_CORES > 1 )
         {
             /* Append the idle task number to the end of the name.
@@ -3816,43 +3837,55 @@ STATIC BaseType_t prvCreateIdleTasks( void )
              * core IDs (0-9). If the core ID exceeds 9, the idle task
              * name will contain an incorrect ASCII character. This is
              * acceptable as the task name is used mainly for debugging. */
+            /* 在名字末尾追加核编号（'0'~'9'）。
+             * 注意注释里的限制：只支持单个字符的核 ID，超过 9 会得到错误 ASCII 字符——
+             * 但任务名主要用于调试，影响可接受。 */
             cIdleName[ xIdleTaskNameIndex ] = ( char ) ( xCoreID + '0' );
             cIdleName[ xIdleTaskNameIndex + 1U ] = '\0';
         }
         #endif /* if ( configNUMBER_OF_CORES > 1 ) */
 
+        /* ---------- 按配置选择"静态分配"还是"动态分配" ---------- */
         #if ( configSUPPORT_STATIC_ALLOCATION == 1 )
         {
-            StaticTask_t * pxIdleTaskTCBBuffer = NULL;
-            StackType_t * pxIdleTaskStackBuffer = NULL;
-            configSTACK_DEPTH_TYPE uxIdleTaskStackSize;
+            /* 静态分配：RAM 由用户提供，FreeRTOS 不调用 malloc */
+            StaticTask_t * pxIdleTaskTCBBuffer = NULL;  /* 用户提供的 TCB 内存 */
+            StackType_t * pxIdleTaskStackBuffer = NULL; /* 用户提供的栈内存 */
+            configSTACK_DEPTH_TYPE uxIdleTaskStackSize;/* 栈深度（由用户回调告知） */
 
             /* The Idle task is created using user provided RAM - obtain the
              * address of the RAM then create the idle task. */
             #if ( configNUMBER_OF_CORES == 1 )
             {
+                /* 单核：向用户要一块 RAM，通过回调函数输出地址和大小 */
                 vApplicationGetIdleTaskMemory( &pxIdleTaskTCBBuffer, &pxIdleTaskStackBuffer, &uxIdleTaskStackSize );
             }
             #else
             {
+                /* 多核：核 0 用普通回调，其他核用被动空闲任务的内存回调 */
                 if( xCoreID == 0 )
                 {
                     vApplicationGetIdleTaskMemory( &pxIdleTaskTCBBuffer, &pxIdleTaskStackBuffer, &uxIdleTaskStackSize );
                 }
                 else
                 {
+                    /* 第四个参数 xCoreID-1：被动空闲任务按 0 起始编号 */
                     vApplicationGetPassiveIdleTaskMemory( &pxIdleTaskTCBBuffer, &pxIdleTaskStackBuffer, &uxIdleTaskStackSize, ( BaseType_t ) ( xCoreID - 1 ) );
                 }
             }
             #endif /* if ( configNUMBER_OF_CORES == 1 ) */
+            /* 用静态 API 创建任务：直接使用上面拿到的缓冲区，不分配堆内存 */
             xIdleTaskHandles[ xCoreID ] = xTaskCreateStatic( pxIdleTaskFunction,
                                                              cIdleName,
                                                              uxIdleTaskStackSize,
-                                                             ( void * ) NULL,
+                                                             ( void * ) NULL,/* 无参数 */
+                                                             /* 优先级就是 idle 优先级（0）。
+                                                              * portPRIVILEGE_BIT 在非 MPU 端口为 0，
+                                                              * 在 MPU 端口用于让空闲任务运行在特权态 */
                                                              portPRIVILEGE_BIT, /* In effect ( tskIDLE_PRIORITY | portPRIVILEGE_BIT ), but tskIDLE_PRIORITY is zero. */
                                                              pxIdleTaskStackBuffer,
                                                              pxIdleTaskTCBBuffer );
-
+             /* 静态创建返回 NULL 表示失败（内存不足等） */
             if( xIdleTaskHandles[ xCoreID ] != NULL )
             {
                 xReturn = pdPASS;
@@ -3862,34 +3895,42 @@ STATIC BaseType_t prvCreateIdleTasks( void )
                 xReturn = pdFAIL;
             }
         }
-        #else /* if ( configSUPPORT_STATIC_ALLOCATION == 1 ) */
+        #else /* if ( configSUPPORT_STATIC_ALLOCATION == 1 ) *//* 动态分配（默认配置） */
         {
             /* The Idle task is being created using dynamically allocated RAM. */
+            /* 用动态 API 创建：栈和 TCB 从 FreeRTOS 堆（heap_1~heap_5）分配。
+             * 注意这里栈用的是 configMINIMAL_STACK_SIZE，不是用户回调给的值 */
             xReturn = xTaskCreate( pxIdleTaskFunction,
                                    cIdleName,
-                                   configMINIMAL_STACK_SIZE,
+                                   configMINIMAL_STACK_SIZE,/* 空闲任务固定用最小栈 */
                                    ( void * ) NULL,
+                                   /* 同上：空闲优先级 0 | portPRIVILEGE_BIT */
                                    portPRIVILEGE_BIT, /* In effect ( tskIDLE_PRIORITY | portPRIVILEGE_BIT ), but tskIDLE_PRIORITY is zero. */
                                    &xIdleTaskHandles[ xCoreID ] );
         }
         #endif /* configSUPPORT_STATIC_ALLOCATION */
 
         /* Break the loop if any of the idle task is failed to be created. */
+        /* ---------- 任何一个空闲任务创建失败就停止创建 ---------- */
         if( xReturn != pdPASS )
         {
-            break;
+            break;/* 空闲任务是内核基础，创建失败没必要继续 */
         }
         else
         {
             #if ( configNUMBER_OF_CORES == 1 )
             {
-                mtCOVERAGE_TEST_MARKER();
+                mtCOVERAGE_TEST_MARKER();/* 单核：什么都不用做，占位 */
             }
             #else
             {
                 /* Assign idle task to each core before SMP scheduler is running. */
-                xIdleTaskHandles[ xCoreID ]->xTaskRunState = xCoreID;
-                pxCurrentTCBs[ xCoreID ] = xIdleTaskHandles[ xCoreID ];
+                /* 多核：在 SMP 调度器启动前，先手工把空闲任务绑定到对应核，
+                 * 保证调度器一跑起来，每个核都有可运行的任务，不会空转 */
+                xIdleTaskHandles[ xCoreID ]->xTaskRunState = xCoreID;/* 指定运行在该核 */
+                pxCurrentTCBs[ xCoreID ] = xIdleTaskHandles[ xCoreID ];/* 该核的当前任务 = 空闲任务 */
+                 /* 若启用了"空闲任务核亲和性"，进一步设置亲和性掩码，
+                 * 把空闲任务钉死在对应核上（(1<<coreID) 表示只允许该核运行） */
                 #if ( ( configIDLE_AFFINITY == 1 ) && ( configUSE_CORE_AFFINITY == 1 ) )
                 {
                     xIdleTaskHandles[ xCoreID ]->uxCoreAffinityMask = ( ( UBaseType_t ) 1U << ( UBaseType_t ) xCoreID );
@@ -3912,7 +3953,7 @@ STATIC BaseType_t prvCreateIdleTasks( void )
 void vTaskStartScheduler( void )
 {
     BaseType_t xReturn;
-
+    //编译期开关
     traceENTER_vTaskStartScheduler();
     //多核亲和性检查
     #if ( configUSE_CORE_AFFINITY == 1 ) && ( configNUMBER_OF_CORES > 1 )

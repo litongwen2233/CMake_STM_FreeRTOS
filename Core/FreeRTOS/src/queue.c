@@ -301,33 +301,55 @@ static void prvInitialiseNewQueue( const UBaseType_t uxQueueLength,
 /*-----------------------------------------------------------*/
 
 /**
- * @brief 
+ * @brief 复位队列到初始（空）状态，可选地重置阻塞链表
  * 
- * @param xQueue 
+ * @param xQueue 要复位的队列句柄
  * @param xNewQueue 
- * @return BaseType_t 
+ *                  pdTRUE  = 队列刚创建，阻塞链表还需初始化
+ *                  pdFALSE = 队列已存在，只清空数据、不重建链表
+ * @return BaseType_t pdPASS 成功；pdFAIL 参数非法（长度/元素大小为 0 或乘法溢出）
  */
 BaseType_t xQueueGenericReset( QueueHandle_t xQueue,
                                BaseType_t xNewQueue )
 {
-    BaseType_t xReturn = pdPASS;
-    Queue_t * const pxQueue = xQueue;
+    BaseType_t xReturn      = pdPASS;       /* 默认返回成功 */
+    Queue_t * const pxQueue = xQueue;       /* 保存句柄，const 指针本身不可改 */
 
+    /* 跟踪钩子：记录函数进入（未启用追踪时为空宏） */
     traceENTER_xQueueGenericReset( xQueue, xNewQueue );
 
+    /* 断言：句柄不能为 NULL（调试期捕获空指针误用） */
     configASSERT( pxQueue );
 
+    /* 进入核心逻辑前的合法性守卫：
+     *   1) 队列非空指针
+     *   2) uxLength >= 1   —— 队列深度至少 1，0 长度无意义
+     *   3) 乘法不溢出      —— 检查 uxLength * uxItemSize 是否超出 SIZE_MAX，
+     *                        否则 pcTail 计算会回绕成错误地址。
+     *                        用除法反向验证：SIZE_MAX / length >= itemSize */
     if( ( pxQueue != NULL ) &&
         ( pxQueue->uxLength >= 1U ) &&
         /* Check for multiplication overflow. */
         ( ( SIZE_MAX / pxQueue->uxLength ) >= pxQueue->uxItemSize ) )
     {
+        /* 复位涉及多个字段的原子修改，且要操作阻塞链表，
+         * 必须进临界区，防止被中断或任务切换打断 */
         taskENTER_CRITICAL();
         {
+            /* pcTail：队列存储区末尾（超过最后一个元素一个单位）
+             *         = 起始地址 + 深度 * 元素大小 */
             pxQueue->u.xQueue.pcTail = pxQueue->pcHead + ( pxQueue->uxLength * pxQueue->uxItemSize );
+            /* 清空"当前等待被读取的消息数"——复位后队列为空 */
             pxQueue->uxMessagesWaiting = ( UBaseType_t ) 0U;
+            /* 写指针回到存储区起始：下一个写入的槽位是第 0 个 */
             pxQueue->pcWriteTo = pxQueue->pcHead;
+            /* 读指针指向"最后一个槽位"，而不是起始位置！
+             * 这是 FreeRTOS 环形缓冲的巧妙设计：
+             * 读操作会先把 pcReadFrom 前移一格再读，所以初始指向
+             * 末尾，第一次读就绕到第 0 个元素，天然实现环形回绕 */
             pxQueue->u.xQueue.pcReadFrom = pxQueue->pcHead + ( ( pxQueue->uxLength - 1U ) * pxQueue->uxItemSize );
+            /* 复位两个锁计数：cRxLock/cTxLock 用于 ISR 与任务间接访问队列时
+             * 统计"锁期间发生了多少次收发"，queueUNLOCKED 表示未加锁 */
             pxQueue->cRxLock = queueUNLOCKED;
             pxQueue->cTxLock = queueUNLOCKED;
 
@@ -338,40 +360,53 @@ BaseType_t xQueueGenericReset( QueueHandle_t xQueue,
                  * will still be empty.  If there are tasks blocked waiting to write to
                  * the queue, then one should be unblocked as after this function exits
                  * it will be possible to write to it. */
+                /* 情况 A：对"已有队列"做运行时复位
+                 *
+                 * 队列被清空后：
+                 *  - 等待"读"的任务继续阻塞（因为队列仍然是空的，无数据可读）
+                 *  - 等待"写"的任务应该唤醒一个（因为腾出了空间，可以写了）*/
                 if( listLIST_IS_EMPTY( &( pxQueue->xTasksWaitingToSend ) ) == pdFALSE )
                 {
+                    /* 从"等待发送"阻塞链表中摘出一个任务（优先级最高的那个）。
+                     * 返回 pdTRUE 表示摘下的是优先级高于当前运行任务的，
+                     * 此时需要触发一次任务切换 */
                     if( xTaskRemoveFromEventList( &( pxQueue->xTasksWaitingToSend ) ) != pdFALSE )
                     {
-                        queueYIELD_IF_USING_PREEMPTION();
+                        queueYIELD_IF_USING_PREEMPTION();   /* 抢占式调度下立即让出 CPU */
                     }
                     else
                     {
-                        mtCOVERAGE_TEST_MARKER();
+                        mtCOVERAGE_TEST_MARKER();        /* 覆盖率测试占位，无实际动作 */
                     }
                 }
                 else
                 {
-                    mtCOVERAGE_TEST_MARKER();
+                    mtCOVERAGE_TEST_MARKER();       /* 没有等待发送的任务，什么都不做 */
                 }
             }
             else
             {
                 /* Ensure the event queues start in the correct state. */
+                /* 情况 B：队列刚创建（xNewQueue == pdTRUE）
+                 * 此时两个阻塞链表还是未初始化的脏内存，必须初始化，
+                 * 保证队列以正确状态开始使用 */
                 vListInitialise( &( pxQueue->xTasksWaitingToSend ) );
                 vListInitialise( &( pxQueue->xTasksWaitingToReceive ) );
             }
         }
-        taskEXIT_CRITICAL();
+        taskEXIT_CRITICAL();        /* 退出临界区，恢复中断 */
     }
     else
     {
+        /* 参数非法（空指针 / 长度为 0 / 乘法溢出）→ 返回失败 */
         xReturn = pdFAIL;
     }
-
+    /* 断言：走到这里不该是 pdFAIL（正常调用路径下参数应当合法） */
     configASSERT( xReturn != pdFAIL );
 
     /* A value is returned for calling semantic consistency with previous
      * versions. */
+    /* 注释：返回值保留是为了与旧版本调用语义保持一致（历史兼容） */
     traceRETURN_xQueueGenericReset( xReturn );
 
     return xReturn;

@@ -173,6 +173,7 @@ static UBaseType_t uxCriticalNesting = 0xaaaaaaaa;
 
 /*
  * See header file for description.
+    初始化任务栈内存
  */
 StackType_t * pxPortInitialiseStack( StackType_t * pxTopOfStack,
                                      TaskFunction_t pxCode,
@@ -180,17 +181,22 @@ StackType_t * pxPortInitialiseStack( StackType_t * pxTopOfStack,
 {
     /* Simulate the stack frame as it would be created by a context switch
      * interrupt. */
+    //发生异常时，自动加载到CPU寄存器的内容
     pxTopOfStack--;                                                      /* Offset added to account for the way the MCU uses the stack on entry/exit of interrupts. */
     *pxTopOfStack = portINITIAL_XPSR;                                    /* xPSR */
     pxTopOfStack--;
     *pxTopOfStack = ( ( StackType_t ) pxCode ) & portSTART_ADDRESS_MASK; /* PC */
     pxTopOfStack--;
-    *pxTopOfStack = ( StackType_t ) prvTaskExitError;                    /* LR */
+    *pxTopOfStack = ( StackType_t ) prvTaskExitError;  // 任务返回地址，返回了就要这个函数里面                  /* LR */
 
+    /* R12, R3, R2 and R1 默认初始化为0 */
     pxTopOfStack -= 5;                                                   /* R12, R3, R2 and R1. */
     *pxTopOfStack = ( StackType_t ) pvParameters;                        /* R0 */
+    
+    // 异常发生时，手动加载到cpu寄存器的内容
     pxTopOfStack -= 8;                                                   /* R11, R10, R9, R8, R7, R6, R5 and R4. */
 
+    // 返回栈顶指针，此时pxTopOfStack指向空闲栈
     return pxTopOfStack;
 }
 /*-----------------------------------------------------------*/
@@ -211,21 +217,31 @@ static void prvTaskExitError( void )
     }
 }
 /*-----------------------------------------------------------*/
-
+//SVC 中断服务函数，启动第一个函数
 __asm void vPortSVCHandler( void )
 {
 /* *INDENT-OFF* */
+    //8 字节对齐
     PRESERVE8
-
+    //将 pxCurrentTCB 指针的地址加载到寄存器 r3
     ldr r3, = pxCurrentTCB   /* Restore the context. */
+    //将 pxCurrentTCB 指针指向的地址（存储TCB的地址）加载到寄存器 r1
     ldr r1, [ r3 ] /* Use pxCurrentTCBConst to get the pxCurrentTCB address. */
+    //将 pxCurrentTCB 指针指向的地址里的值（当前运行的TCB结构体）加载到寄存器r0
+    //任务控制块的第一个成员就是栈顶指针，所以r0中存储了当前运行的任务的栈顶指针的地址
     ldr r0, [ r1 ]           /* The first item in pxCurrentTCB is the task top of stack. */
+    //以寄存器 r0 为基地址，将任务栈中存储的值加载到寄存器r4 ~ r11 中
+    //同时寄存器 r0 的值加载给psp
     ldmia r0 !, { r4 - r11 } /* Pop the registers that are not automatically saved on exception entry and the critical nesting count. */
+    //将更新后的寄存器 r0 的值加载给psp
     msr psp, r0 /* Restore the task stack pointer. */
     isb
+    //开中断
     mov r0, # 0
     msr basepri, r0
+    //指示处理器在异常时 使用psp作为堆栈指针
     orr r14, # 0xd
+    //异常返回，自动加载剩下的 xPSR,PC,R14,R12和R3 ~ R0 寄存器
     bx r14
 /* *INDENT-ON* */
 }
@@ -233,22 +249,28 @@ __asm void vPortSVCHandler( void )
 
 __asm void prvStartFirstTask( void )
 {
-/* *INDENT-OFF* */
+/* *INDENT-OFF* 8字节对齐 */
     PRESERVE8
 
     /* Use the NVIC offset register to locate the stack. */
+    /**在corteex-M中，内核外设SCB的地址范围为：0xE000ED00-0xE000ED3F
+     * 0xE000ED08是SCB_VTOR这个寄存器的地址，这是向量表偏移寄存器
+     * 里面放的是向量表的起始地址，向量表通常是从内部FLASH的其实地址0x00000000开始存放
+     */
     ldr r0, =0xE000ED08
-    ldr r0, [ r0 ]
-    ldr r0, [ r0 ]
+    ldr r0, [ r0 ]      //引用r0 相当于r0 = *r0 此时 r0 = 0x00000000
+    ldr r0, [ r0 ]      //将0x00000000的内容放到r0，0x00000000中存放着MSP的初始值
 
     /* Set the msp back to the start of the stack. */
-    msr msp, r0
+    msr msp, r0 //设置主指针 msp的值
     /* Globally enable interrupts. */
+    //启用全局中断
     cpsie i
     cpsie f
     dsb
     isb
     /* Call SVC to start the first task. */
+    //触发SVC中断，启动第一个任务
     svc 0
     nop
     nop
@@ -258,15 +280,26 @@ __asm void prvStartFirstTask( void )
 
 /*
  * See header file for description.
+ * 调度器启动函数
  */
 BaseType_t xPortStartScheduler( void )
 {
+    /* ============================================================
+     * 第一部分：中断优先级配置校验（仅当 configASSERT 打开时编译）
+     * 目的：确认硬件实际实现了几个优先级位，并据此校准
+     *      configMAX_SYSCALL_INTERRUPT_PRIORITY，防止用户配置错误
+     * ============================================================ */
     #if ( configASSERT_DEFINED == 1 )
     {
-        volatile uint8_t ucOriginalPriority;
-        volatile uint32_t ulImplementedPrioBits = 0;
+        volatile uint8_t ucOriginalPriority;    /* 保存被改写的优先级寄存器原值，校验完要还原 */
+        volatile uint32_t ulImplementedPrioBits = 0;/* 硬件实际实现的优先级位数（0~8） */
+         /* 取"第一个用户中断"对应的优先级寄存器地址：
+         * portNVIC_IP_REGISTERS_OFFSET_16 = NVIC 优先级寄存器组基址(0xE000E400)
+         * portFIRST_USER_INTERRUPT_NUMBER = 第一个用户可用的外部中断号(通常是 16，即 IRQ0)
+         * 思路：往这个寄存器写全 1，再读回来，看几位"粘住"了 = 硬件实现了几位
+         */
         volatile uint8_t * const pucFirstUserPriorityRegister = ( uint8_t * ) ( portNVIC_IP_REGISTERS_OFFSET_16 + portFIRST_USER_INTERRUPT_NUMBER );
-        volatile uint8_t ucMaxPriorityValue;
+        volatile uint8_t ucMaxPriorityValue;/* 读回来的最大值，位模式反映实现了几位 */
 
         /* Determine the maximum priority from which ISR safe FreeRTOS API
          * functions can be called.  ISR safe functions are those that end in
@@ -274,16 +307,22 @@ BaseType_t xPortStartScheduler( void )
          * ensure interrupt entry is as fast and simple as possible.
          *
          * Save the interrupt priority value that is about to be clobbered. */
+          /* 保存即将被破坏的中断优先级值（校验完要还原，避免影响其他代码 */
         ucOriginalPriority = *pucFirstUserPriorityRegister;
 
         /* Determine the number of priority bits available.  First write to all
          * possible bits. */
+        /* 先往寄存器写全 0xFF（portMAX_8_BIT_VALUE = 0xFF），把所有可能位都置 1 */
         *pucFirstUserPriorityRegister = portMAX_8_BIT_VALUE;
 
         /* Read the value back to see how many bits stuck. */
+         /* 再读回来：硬件没实现的位会读回 0，据此判断实际实现了几位
+         * 例如读回 0xF0 → 高 4 位有效 → 实现 4 个优先级位 */
         ucMaxPriorityValue = *pucFirstUserPriorityRegister;
 
         /* Use the same mask on the maximum system call priority. */
+        /* 用同一掩码约束系统调用最大优先级：
+         * 把用户配置的值与"硬件实际支持的位"相与，去掉无效位 */
         ucMaxSysCallPriority = configMAX_SYSCALL_INTERRUPT_PRIORITY & ucMaxPriorityValue;
 
         /* Check that the maximum system call priority is nonzero after
@@ -292,15 +331,21 @@ BaseType_t xPortStartScheduler( void )
          * register to 0 unmasks all interrupts, and interrupts with priority 0
          * cannot be masked using BASEPRI.
          * See https://www.FreeRTOS.org/RTOS-Cortex-M3-M4.html */
+        /* 断言 1：校准后的最大系统调用优先级不能为 0
+         * 原因：BASEPRI 写 0 表示"不屏蔽任何中断"，而优先级 0 的中断
+         *      本来也无法用 BASEPRI 屏蔽，所以 0 是非法值 */
         configASSERT( ucMaxSysCallPriority );
 
         /* Check that the bits not implemented in hardware are zero in
          * configMAX_SYSCALL_INTERRUPT_PRIORITY. */
+         /* 断言 2：configMAX_SYSCALL_INTERRUPT_PRIORITY 里"硬件未实现的位"必须为 0
+         * 例如硬件只实现高 4 位，那配置值必须形如 0xX0 这种低 4 位为 0 的形式 */
         configASSERT( ( configMAX_SYSCALL_INTERRUPT_PRIORITY & ( ~ucMaxPriorityValue ) ) == 0U );
 
         /* Calculate the maximum acceptable priority group value for the number
          * of bits read back. */
-
+         /* 统计实现了几位：从最高位开始，只要最高位还是 1，就计数并左移
+         * 例如 ucMaxPriorityValue=0xF0，循环 4 次后变 0x00，得 ulImplementedPrioBits=4 */
         while( ( ucMaxPriorityValue & portTOP_BIT_OF_BYTE ) == portTOP_BIT_OF_BYTE )
         {
             ulImplementedPrioBits++;
@@ -326,38 +371,75 @@ BaseType_t xPortStartScheduler( void )
              * The following assert ensures that the sub-priority bit in the
              * configMAX_SYSCALL_INTERRUPT_PRIORITY is clear to avoid the above mentioned
              * confusion. */
+            /* 特殊情况：硬件实现了完整 8 位优先级
+             * 此时软件无法配出"没有子优先级"的 PRIGROUP，最低位必然用于子优先级，
+             * 结果是 128 个抢占优先级 × 2 个子优先级。
+             * 这会带来一个易混淆现象：若 configMAX_SYSCALL_INTERRUPT_PRIORITY=5，
+             * 则优先级 5 和 4 的中断在临界区里都会一起被屏蔽（它们抢占优先级相同）。
+             * 断言保证配置值的子优先级位（bit0）为 0，避免这种混淆 */
             configASSERT( ( configMAX_SYSCALL_INTERRUPT_PRIORITY & 0x1U ) == 0U );
             ulMaxPRIGROUPValue = 0;
         }
         else
         {
+            /* 非 8 位情况：算出最大可用的 PRIGROUP 值
+             * portMAX_PRIGROUP_BITS = 7（PRIGROUP 字段共 3 位，最大 7）
+             * 例如实现 4 位 → ulMaxPRIGROUPValue = 7 - 4 = 3 */
             ulMaxPRIGROUPValue = portMAX_PRIGROUP_BITS - ulImplementedPrioBits;
         }
 
         /* Shift the priority group value back to its position within the AIRCR
          * register. */
+        /* 把 PRIGROUP 值移到 AIRCR 寄存器中的正确位置并掩码
+         * portPRIGROUP_SHIFT = 8（AIRCR 的 PRIGROUP 字段在 bit[10:8]）
+         * portPRIORITY_GROUP_MASK = 0x07 << 8 */
         ulMaxPRIGROUPValue <<= portPRIGROUP_SHIFT;
         ulMaxPRIGROUPValue &= portPRIORITY_GROUP_MASK;
 
         /* Restore the clobbered interrupt priority register to its original
          * value. */
+        /* 把当初被我们改写的那个优先级寄存器还原，不留副作用 */
         *pucFirstUserPriorityRegister = ucOriginalPriority;
     }
     #endif /* configASSERT_DEFINED */
 
     /* Make PendSV and SysTick the lowest priority interrupts. */
-    portNVIC_SHPR3_REG |= portNVIC_PENDSV_PRI;
+    /* ============================================================
+     * 第二部分：设置 PendSV 和 SysTick 为最低优先级
+     * 原因：这两个系统异常负责上下文切换和系统节拍，
+     *      必须能抢占普通任务，且不能打断用户的中断服务程序，
+     *      所以设为优先级最低（数值最大）
+     * SHPR3 寄存器：同时管理 PendSV(bit[23:16]) 和 SysTick(bit[31:24])
+     * ============================================================ */
+    portNVIC_SHPR3_REG |= portNVIC_PENDSV_PRI;  /* 设 PendSV 优先级最低 */
 
-    portNVIC_SHPR3_REG |= portNVIC_SYSTICK_PRI;
+    portNVIC_SHPR3_REG |= portNVIC_SYSTICK_PRI; /* 设 SysTick 优先级最低 */
 
     /* Start the timer that generates the tick ISR.  Interrupts are disabled
      * here already. */
+    /* ============================================================
+     * 第三部分：启动产生节拍中断的定时器
+     * 通常是配置 SysTick：设重载值、清计数、使能中断和计数
+     * 注意：此时全局中断还是关闭状态（调用者已关），
+     *      要等 prvStartFirstTask() 里 SVC 异常返回时才真正开启
+     * ============================================================ */
     vPortSetupTimerInterrupt();
 
     /* Initialise the critical nesting count ready for the first task. */
+    /* 初始化临界区嵌套计数，为第一个任务准备好
+     * 该变量记录"中断被屏蔽了多少层"，第一个任务开始时应为 0 */
     uxCriticalNesting = 0;
 
     /* Start the first task. */
+     /* ============================================================
+     * 第四部分：启动第一个任务（关键且"不返回"）
+     * 内部会：
+     *   1. 设置 MSP 为栈顶
+     *   2. 触发 SVC 异常（svc 0）
+     *   3. SVC 处理程序里把 PSP 指向第一个任务的栈，并 bx r14 异常返回
+     *   4. 从此 CPU 就"住进"第一个任务里，永远在任务上下文运行
+     * 所以这个函数正常永远不会返回
+     * ============================================================ */
     prvStartFirstTask();
 
     /* Should not get here! */
@@ -401,46 +483,74 @@ void vPortExitCritical( void )
     }
 }
 /*-----------------------------------------------------------*/
-
+// 
+/**
+ * @brief PendSV 中断服务函数，进行任务的切换
+ *        __asm 是 C/C++ 编译器提供的内联汇编（inline assembly）声明符，
+ *        用来在 C 代码里直接嵌入汇编指令
+ * 
+ * @return __asm 
+ */
 __asm void xPortPendSVHandler( void )
 {
+    // 只要触发 PendSV 中断，寄存器 xPSR、PC、R14、R12 和 R3 ~ R0，
+	// 这 8 个寄存器的值会自动从 psp 指针指向的地址开始加载到任务栈中
+	// 并且 psp 指针也会自动更新
     extern uxCriticalNesting;
     extern pxCurrentTCB;
     extern vTaskSwitchContext;
 
-/* *INDENT-OFF* */
+    /* *INDENT-OFF* */
     PRESERVE8
-
+    // 将 psp 的值存储到寄存器 r0 中 
     mrs r0, psp
     isb
-
+    // 将 pxCurrentTCB 的地址存储到寄存器 r3 中
     ldr r3, =pxCurrentTCB /* Get the location of the current TCB. */
+    // 将寄存器 r3 存储的地址里的内容存储到寄存器 r2 中
+	// 此时寄存器 r2 中存储了当前执行任务的 TCB 地址
     ldr r2, [ r3 ]
-
+    // 以寄存器 r0 为基地址（r0 中现在存储了 psp 指针的值）
+	// 将寄存器 r11 ~ r4 中存储的值存储到任务栈
+	// 并且 r0 中存储的地址指针也会自动更新
     stmdb r0 !, { r4 - r11 } /* Save the remaining registers. */
+    // 将寄存器 r0 中的内容存储到上一个执行任务的 TCB 地址
+	// 也即上一个任务的栈顶指针 pxTopOfStack 指向寄存器 r0 现在存储的地址
     str r0, [ r2 ] /* Save the new top of stack into the first member of the TCB. */
-
+    // 上文保存完成
+	// 开始加载下文
+	// 将寄存器 r3 和 r14 压入栈
     stmdb sp !, { r3, r14 }
+    // 屏蔽 优先级值 高于或者等于 11 的中断
     mov r0, #configMAX_SYSCALL_INTERRUPT_PRIORITY
     msr basepri, r0
     dsb
     isb
+    // 跳转到 vTaskSwitchContext 函数，得到下一个要执行任务的指针 pxCurrentTCB
     bl vTaskSwitchContext
+    // 开中断
     mov r0, #0
     msr basepri, r0
+    // 恢复寄存器 r3 和 r14
     ldmia sp !, { r3, r14 }
-
+    // 将 pxCurrentTCB 加载到寄存器 r1 
     ldr r1, [ r3 ]
+    // 将下一个要执行任务的栈顶指针加载到寄存器 r0 
     ldr r0, [ r1 ] /* The first item in pxCurrentTCB is the task top of stack. */
+    // 以寄存器 r0 为基地址（r0 中现在存储了任务的栈顶指针）
+	// 将任务栈中存储的值加载到寄存器 r4 ~ r11 中
+	// 同时 r0 中的值会自动更新
     ldmia r0 !, { r4 - r11 } /* Pop the registers and the critical nesting count. */
+    // 将更新后的 r0 的值加载到 psp
     msr psp, r0
     isb
+    // 异常退出，自动加载剩下的 xPSR、PC、R14、R12 和 R3 ~ R0 寄存器
     bx r14
     nop
 /* *INDENT-ON* */
 }
 /*-----------------------------------------------------------*/
-
+// 阻塞延时，SysTick 中断服务函数
 void xPortSysTickHandler( void )
 {
     /* The SysTick runs at the lowest interrupt priority, so when this interrupt
@@ -448,10 +558,12 @@ void xPortSysTickHandler( void )
      * save and then restore the interrupt mask value as its value is already
      * known - therefore the slightly faster vPortRaiseBASEPRI() function is used
      * in place of portSET_INTERRUPT_MASK_FROM_ISR(). */
+    // 关中断
     vPortRaiseBASEPRI();
     traceISR_ENTER();
     {
         /* Increment the RTOS tick. */
+        // 更新任务延时参数
         if( xTaskIncrementTick() != pdFALSE )
         {
             traceISR_EXIT_TO_SCHEDULER();
@@ -465,7 +577,7 @@ void xPortSysTickHandler( void )
             traceISR_EXIT();
         }
     }
-
+    // 开中断
     vPortClearBASEPRIFromISR();
 }
 /*-----------------------------------------------------------*/
@@ -697,24 +809,67 @@ void xPortSysTickHandler( void )
  * frequency.
  */
 #if ( configOVERRIDE_DEFAULT_TICK_CONFIGURATION == 0 )
-
+    /* __weak 表示这是"弱符号"：如果用户在别处定义了一个同名强符号函数，
+    * 链接时会用用户的版本覆盖它。方便用户替换成自定义时基（比如用 TIM 代替 SysTick） */
     __weak void vPortSetupTimerInterrupt( void )
     {
         /* Calculate the constants required to configure the tick interrupt. */
+        /* ============================================================
+        * 第零部分：为 tickless idle（无节拍低功耗）预计算常量
+        * 只有开启 configUSE_TICKLESS_IDLE 时才需要
+        * ============================================================ */
         #if ( configUSE_TICKLESS_IDLE == 1 )
         {
+            /* 一个 tick 对应多少个 SysTick 计数：
+            * configSYSTICK_CLOCK_HZ = SysTick 时钟频率（默认等于 CPU 频率）
+            * configTICK_RATE_HZ     = 系统节拍频率（如 1000Hz）
+            * 例：72MHz / 1000 = 72000 个计数 = 1 个 tick */
             ulTimerCountsForOneTick = ( configSYSTICK_CLOCK_HZ / configTICK_RATE_HZ );
+            /* 一次最多能"偷睡"多少个 tick：
+            * SysTick 是 24 位计数器，最大值 0xFFFFFF（portMAX_24_BIT_NUMBER）
+            * 用它除以"一个 tick 的计数"，得到单次最大可屏蔽的 tick 数
+            * 超过这个数就需要分段补偿，所以记录上限 */
             xMaximumPossibleSuppressedTicks = portMAX_24_BIT_NUMBER / ulTimerCountsForOneTick;
+            /* 停止/重启定时器的补偿系数：
+            * 从低功耗模式恢复后，读到的计数可能有偏差（漏计），
+            * 这项预计算用于后续补偿这些"漏掉"的计数 */
             ulStoppedTimerCompensation = portMISSED_COUNTS_FACTOR / ( configCPU_CLOCK_HZ / configSYSTICK_CLOCK_HZ );
         }
         #endif /* configUSE_TICKLESS_IDLE */
 
+         /* ============================================================
+        * 第一部分：先停掉并清空 SysTick
+        * 改配置前必须使能位清零，否则新值可能不生效
+        * ============================================================ */
+
         /* Stop and clear the SysTick. */
+         /* 写 0 到 SysTick 控制寄存器：关使能、关中断、清时钟源选择
+        * 相当于"先刹车" */
         portNVIC_SYSTICK_CTRL_REG = 0UL;
+        /* 清当前计数值寄存器（VAL）：
+        * 写任何值都会清零它，并同时清掉 COUNTFLAG 标志
+        * 避免残留的旧计数值影响新的重载设置 */
         portNVIC_SYSTICK_CURRENT_VALUE_REG = 0UL;
 
+        /* ============================================================
+        * 第二部分：配置 SysTick 按目标频率中断
+        * ============================================================ */
+
         /* Configure SysTick to interrupt at the requested rate. */
+        /* 设重载值（LOAD）：
+        * SysTick 是从 LOAD 递减到 0 时产生一次中断，
+        * 所以计数次数 = (时钟频率 / 目标节拍频率)，
+        * 但"从 LOAD 减到 0"共 LOAD+1 次，故要减 1
+        * 例：72MHz/1000Hz = 72000 次 → LOAD = 71999 */
         portNVIC_SYSTICK_LOAD_REG = ( configSYSTICK_CLOCK_HZ / configTICK_RATE_HZ ) - 1UL;
+        /* 设控制寄存器（CTRL），三个位或起来一次性写入：
+        * - portNVIC_SYSTICK_CLK_BIT_CONFIG：选择时钟源
+        *     （=0 用 SysTick 外部时钟，=1 用内核时钟/不分频，由宏决定）
+        * - portNVIC_SYSTICK_INT_BIT：使能倒计时到 0 时产生 SysTick 异常
+        * - portNVIC_SYSTICK_ENABLE_BIT：启动计数器
+        * 这一步做完，SysTick 就开始跑了；但因为当前全局中断处于关闭状态
+        * （调用者是 xPortStartScheduler，进来时中断是关的），
+        * 要等 prvStartFirstTask() 里 SVC 返回才真正开启中断响应 */
         portNVIC_SYSTICK_CTRL_REG = ( portNVIC_SYSTICK_CLK_BIT_CONFIG | portNVIC_SYSTICK_INT_BIT | portNVIC_SYSTICK_ENABLE_BIT );
     }
 

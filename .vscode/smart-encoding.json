@@ -1,8 +1,12 @@
 {
   "version": 2,
   "files": {
+    "Core/FreeRTOS/FreeRTOSConfig.h": "utf8",
     "Core/FreeRTOS/include/FreeRTOS.h": "utf8",
     "Core/FreeRTOS/include/task.h": "utf8",
+    "Core/FreeRTOS/port/RVDS/ARM_CM3/port.c": "utf8",
+    "Core/FreeRTOS/port/RVDS/ARM_CM3/portmacro.h": "utf8",
+    "Core/FreeRTOS/port/RVDS/ARM_CM4_MPU/port.c": "utf8",
     "Core/FreeRTOS/src/event_groups.c": "utf8",
     "Core/FreeRTOS/src/list.c": "utf8",
     "Core/FreeRTOS/src/queue.c": "utf8",

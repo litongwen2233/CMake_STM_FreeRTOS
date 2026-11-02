@@ -65,6 +65,8 @@ volatile uint32_t ulHeartbeatCount = 0;
 #define LED_GPIO_PORT   GPIOC
 #define LED_GPIO_PIN    GPIO_PIN_13
 
+
+
 /* 任务1：每 500ms 翻转一次 LED（可见闪烁，证明 SysTick/上下文切换正常） */
 static void vLedBlinkTask(void *pvParameters)
 {
@@ -85,6 +87,30 @@ static void vHeartbeatTask(void *pvParameters)
         ulHeartbeatCount++;
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
+}
+
+#define START_TASK_NAME "start_task"
+#define START_TASK_STACK 128
+#define START_TASK_PRIORITY 10
+TaskHandle_t startTaskHandle;
+QueueHandle_t sem,sem2;
+static void startTask(void *args)
+{
+  /* 1. 创建信号量 */
+  sem = xSemaphoreCreateBinary();
+  sem2 = xSemaphoreCreateBinary();
+ /* 创建两个测试任务 */
+  if (xTaskCreate(vLedBlinkTask, "LED", 256, NULL, 1, NULL) != pdPASS)
+  {
+    Error_Handler();
+  }
+  if (xTaskCreate(vHeartbeatTask, "HB", 256, NULL, 1, NULL) != pdPASS)
+  {
+    Error_Handler();
+  }
+  /* 删除自己 */
+  vTaskDelete(NULL);
+  //后面都不会执行
 }
 
 /* 栈溢出钩子：开启 configCHECK_FOR_STACK_OVERFLOW 后必须提供此函数 */
@@ -129,15 +155,13 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   /* USER CODE BEGIN 2 */
-  /* 创建两个测试任务 */
-  if (xTaskCreate(vLedBlinkTask, "LED", 256, NULL, 1, NULL) != pdPASS)
-  {
-    Error_Handler();
-  }
-  if (xTaskCreate(vHeartbeatTask, "HB", 256, NULL, 1, NULL) != pdPASS)
-  {
-    Error_Handler();
-  }
+ /* 1. 创建一个启动任务: 启动任务执行的时候, 创建和业务相关的任务 */
+    BaseType_t r = xTaskCreate(startTask,        /* 启动任务函数 */
+                               START_TASK_NAME,  /* 任务名 */
+                               START_TASK_STACK, /* 栈大小: 单位是字(不是自己) 字的大小: 32位架构是4  START_TASK_STACK * 4 = 字节数  */
+                               NULL,             /* 指定给任务函数传递参数 */
+                               START_TASK_PRIORITY,
+                               &startTaskHandle);
 
   /* 启动调度器：从此由 FreeRTOS 接管 CPU，正常情况下不会返回 */
   vTaskStartScheduler();

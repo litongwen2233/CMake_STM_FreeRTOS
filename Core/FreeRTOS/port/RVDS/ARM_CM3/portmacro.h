@@ -120,10 +120,12 @@ extern void vPortEnterCritical( void );
 extern void vPortExitCritical( void );
 
 #define portDISABLE_INTERRUPTS()                  vPortRaiseBASEPRI()
+/* 不带中断保护的开中断函数 */
 #define portENABLE_INTERRUPTS()                   vPortSetBASEPRI( 0 )
 #define portENTER_CRITICAL()                      vPortEnterCritical()
 #define portEXIT_CRITICAL()                       vPortExitCritical()
 #define portSET_INTERRUPT_MASK_FROM_ISR()         ulPortRaiseBASEPRI()
+/* 带中断保护的开中断函数 */
 #define portCLEAR_INTERRUPT_MASK_FROM_ISR( x )    vPortSetBASEPRI( x )
 
 /*-----------------------------------------------------------*/
@@ -180,7 +182,7 @@ extern void vPortExitCritical( void );
 #endif
 
 /*-----------------------------------------------------------*/
-
+/* 带中断保护的开中断函数 */
 static portFORCE_INLINE void vPortSetBASEPRI( uint32_t ulBASEPRI )
 {
     __asm
@@ -193,7 +195,7 @@ static portFORCE_INLINE void vPortSetBASEPRI( uint32_t ulBASEPRI )
     }
 }
 /*-----------------------------------------------------------*/
-
+// 不带返回值关中断
 static portFORCE_INLINE void vPortRaiseBASEPRI( void )
 {
     uint32_t ulNewBASEPRI = configMAX_SYSCALL_INTERRUPT_PRIORITY;
@@ -224,7 +226,7 @@ static portFORCE_INLINE void vPortClearBASEPRIFromISR( void )
     }
 }
 /*-----------------------------------------------------------*/
-
+// 带返回值关中断
 static portFORCE_INLINE uint32_t ulPortRaiseBASEPRI( void )
 {
     uint32_t ulReturn, ulNewBASEPRI = configMAX_SYSCALL_INTERRUPT_PRIORITY;
@@ -234,8 +236,8 @@ static portFORCE_INLINE uint32_t ulPortRaiseBASEPRI( void )
         /* Set BASEPRI to the max syscall priority to effect a critical
          * section. */
 /* *INDENT-OFF* */
-            mrs ulReturn, basepri
-            msr basepri, ulNewBASEPRI
+            mrs ulReturn, basepri       // 保存中断时 BASEPRI 寄存器的值
+            msr basepri, ulNewBASEPRI   // basepri寄存器：屏蔽 优先级值 大于等于 11 的中断
             dsb
             isb
 /* *INDENT-ON* */

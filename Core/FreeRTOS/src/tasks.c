@@ -2668,7 +2668,7 @@ STATIC void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
 /*-----------------------------------------------------------*/
 
 #if ( INCLUDE_vTaskDelay == 1 )
-
+    // 阻塞延时函数
     void vTaskDelay( const TickType_t xTicksToDelay )
     {
         BaseType_t xAlreadyYielded = pdFALSE;
@@ -4019,23 +4019,43 @@ void vTaskStartScheduler( void )
     traceRETURN_vTaskStartScheduler();
 }
 /*-----------------------------------------------------------*/
-
+/**
+ * @brief 调度器关闭函数
+ * 负责：删掉内核自带的任务（定时器服务任务、各核空闲任务）
+ *         → 回收待终止任务的资源
+ *              → 关中断、标记调度器停止
+ *                   → 调用端口层收尾例程
+ * 
+ */
 void vTaskEndScheduler( void )
 {
+    /* 跟踪钩子：用于可视化/追踪工具记录函数进入（未定义时为空宏） */
     traceENTER_vTaskEndScheduler();
 
+    /* 只有允许删除任务时，本函数才有意义（因为要删内核任务）。
+     * 若 INCLUDE_vTaskDelete 为 0，整个删除逻辑被编译掉。
+     * 注意：configNUMBER_OF_CORES 是 FreeRTOS SMP 引入的宏，
+     *       单核版本里等价于 1，所以这个函数属于较新的内核版本 */
     #if ( INCLUDE_vTaskDelete == 1 )
     {
-        BaseType_t xCoreID;
+        BaseType_t xCoreID;  /* 核编号，多核时用来遍历每个核的空闲任务 */
 
         #if ( configUSE_TIMERS == 1 )
         {
             /* Delete the timer task created by the kernel. */
+            /* 删除内核在调度器启动时创建的"定时器服务任务"（Timer Daemon）
+             * 该任务负责处理软件定时器命令队列（xTimerQueue），
+             * 调度器都要停了，它自然没有存在的意义。
+             * xTimerGetTimerDaemonTaskHandle() 取出它的任务句柄 */
             vTaskDelete( xTimerGetTimerDaemonTaskHandle() );
         }
         #endif /* #if ( configUSE_TIMERS == 1 ) */
 
-        /* Delete Idle tasks created by the kernel.*/
+        /* Delete Idle tasks created by the kernel.
+         * 删除内核空闲任务：单核只有 1 个，SMP 下每个核各 1 个，
+         * 所以用 for 循环按 configNUMBER_OF_CORES 遍历，
+         * xIdleTaskHandles[] 保存了每个核空闲任务的句柄。
+         * 空闲任务优先级最低（0），平时"兜底"运行并回收已删除任务的资源 */
         for( xCoreID = 0; xCoreID < ( BaseType_t ) configNUMBER_OF_CORES; xCoreID++ )
         {
             vTaskDelete( xIdleTaskHandles[ xCoreID ] );
@@ -4045,6 +4065,11 @@ void vTaskEndScheduler( void )
          * xTasksWaitingTermination list. Since the idle task is now deleted and
          * no longer going to run, we need to reclaim resources of all the tasks
          * in the xTasksWaitingTermination list. */
+        /* 空闲任务原本负责回收 xTasksWaitingTermination 链表里那些
+         * "已被 vTaskDelete 标记为删除、但资源还没释放"的任务。
+         * 现在空闲任务被删掉了、不会再运行，所以必须在这里手动调用
+         * prvCheckTasksWaitingTermination()，把链表里任务的
+         * 栈内存和 TCB 全部 free 掉，否则会内存泄漏 */
         prvCheckTasksWaitingTermination();
     }
     #endif /* #if ( INCLUDE_vTaskDelete == 1 ) */
@@ -4052,13 +4077,25 @@ void vTaskEndScheduler( void )
     /* Stop the scheduler interrupts and call the portable scheduler end
      * routine so the original ISRs can be restored if necessary.  The port
      * layer must ensure interrupts enable  bit is left in the correct state. */
-    portDISABLE_INTERRUPTS();
-    xSchedulerRunning = pdFALSE;
+     /* 停掉调度器中断，并调用端口层的收尾例程，
+     * 以便在必要时把（被 FreeRTOS 接管的）原始中断向量还原回去。
+     * 端口层必须保证"中断使能位"最终留在正确的状态。
+     * 注意 portDISABLE_INTERRUPTS() 在本函数中被调用后，
+     * 后续 vPortEndScheduler() 内部不能依赖中断被打开 */
+    portDISABLE_INTERRUPTS();       /* 关全局中断（Cortex-M 上操作 BASEPRI/PRIMASK） */
+    xSchedulerRunning = pdFALSE;    /* 全局标志置假：告知内核"SysTick 已停、不再调度" */
 
     /* This function must be called from a task and the application is
      * responsible for deleting that task after the scheduler is stopped. */
+     /* 调用端口层实现的收尾函数（例如恢复 SysTick、还原向量表、
+     * 关闭时基中断等），具体做什么由所列端口决定。
+     *
+     * 重要：本函数必须从"某个任务"里调用；
+     * 调度器停止后，那个调用它的任务由应用程序负责删除，
+     * 因为此刻已没有内核（空闲任务/GC）会帮你回收它 */
     vPortEndScheduler();
 
+    /* 跟踪钩子：记录函数返回 */
     traceRETURN_vTaskEndScheduler();
 }
 /*----------------------------------------------------------*/
@@ -5003,7 +5040,7 @@ BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
 
 #endif /* INCLUDE_xTaskAbortDelay */
 /*----------------------------------------------------------*/
-
+// 更新任务延时参数
 BaseType_t xTaskIncrementTick( void )
 {
     TCB_t * pxTCB;
